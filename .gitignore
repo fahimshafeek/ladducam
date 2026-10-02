@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# SvelteKit & Vite build outputs
+.svelte-kit/
+build/
+dist/
+
+# Rust / Tauri build outputs
+target/
+
+# Capacitor / Android build outputs
+android/.gradle/
+android/app/build/
+android/build/
+android/.idea/
+android/captures/
+*.apk
+*.aab
+
+# Environment & Logs
+.env
+.env.*
+*.log
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
