@@ -247,7 +247,7 @@
 					</span>
 				{/if}
 			</div>
-			<p bind:this={suggestionTextEl} class="text-sm font-medium leading-relaxed text-foreground">
+			<p bind:this={suggestionTextEl} class="text-sm font-medium leading-relaxed text-foreground max-h-36 overflow-y-auto pr-1">
 				{serverState.currentSuggestion.text}
 			</p>
 		</div>
