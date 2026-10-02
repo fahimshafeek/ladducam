@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { gsap } from 'gsap';
 	import { serverState } from '$lib/server-state.svelte.js';
+	import { n8nService } from '$lib/n8n-service.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 
 	import ArrowLeft from '@lucide/svelte/icons/arrow-left';
@@ -66,7 +67,27 @@
 		initCamera();
 	}
 
-	function handleShutter() {
+	async function captureFrameBlob(): Promise<Blob | null> {
+		if (!videoElement || videoElement.readyState < 2) return null;
+		const canvas = document.createElement('canvas');
+		canvas.width = videoElement.videoWidth || 1280;
+		canvas.height = videoElement.videoHeight || 720;
+		const ctx = canvas.getContext('2d');
+		if (!ctx) return null;
+
+		if (facingMode === 'user') {
+			ctx.translate(canvas.width, 0);
+			ctx.scale(-1, 1);
+		}
+
+		ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
+		return new Promise<Blob | null>((resolve) => {
+			canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.9);
+		});
+	}
+
+	async function handleShutter() {
 		if (shutterBtnEl) {
 			gsap.fromTo(shutterBtnEl, { scale: 0.88 }, { scale: 1, duration: 0.3, ease: 'back.out(2)' });
 		}
@@ -83,6 +104,23 @@
 			try {
 				navigator.vibrate(40);
 			} catch (_) {}
+		}
+
+		const blob = await captureFrameBlob();
+		if (blob) {
+			try {
+				await n8nService.analyzeImage(blob);
+			} catch (e) {
+				console.error('Failed to submit captured photo to n8n:', e);
+			}
+		} else {
+			serverState.currentSuggestion = {
+				id: `s-err-${Date.now()}`,
+				text: 'Could not capture photo frame. Ensure camera stream is active.',
+				confidence: 0,
+				category: 'framing',
+				timestamp: new Date().toLocaleTimeString()
+			};
 		}
 	}
 
@@ -195,8 +233,13 @@
 		<!-- Server Suggestion Box -->
 		<div class="w-full rounded-xl bg-background/85 backdrop-blur-md border border-border p-3.5 shadow-lg">
 			<div class="flex items-center justify-between mb-1">
-				<span class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-					Suggestion
+				<span class="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+					{#if n8nService.isAnalyzing}
+						<RefreshCw class="size-3 animate-spin text-amber-400" />
+						<span class="text-amber-400 font-bold">n8n AI Analyzing...</span>
+					{:else}
+						<span>AI Suggestion</span>
+					{/if}
 				</span>
 				{#if serverState.isConnected}
 					<span class="text-[11px] font-mono text-muted-foreground">
