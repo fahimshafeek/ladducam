@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { gsap } from 'gsap';
 	import { serverState } from '$lib/server-state.svelte.js';
-	import { n8nService } from '$lib/n8n-service.js';
+	import { n8nService } from '$lib/n8n-service.svelte.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 
 	import ArrowLeft from '@lucide/svelte/icons/arrow-left';
