@@ -3,12 +3,23 @@
 	import { gsap } from 'gsap';
 	import { serverState } from '$lib/server-state.svelte.js';
 	import { n8nService } from '$lib/n8n-service.svelte.js';
+	import { voiceService } from '$lib/voice-service.svelte.js';
+	import { mediapipePoseService } from '$lib/mediapipe-pose-service.js';
+	import { mediapipeGestureService } from '$lib/mediapipe-gesture-service.svelte.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 
 	import ArrowLeft from '@lucide/svelte/icons/arrow-left';
 	import FlipHorizontal from '@lucide/svelte/icons/flip-horizontal';
 	import CameraIcon from '@lucide/svelte/icons/camera';
 	import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+	import Mic from '@lucide/svelte/icons/mic';
+	import Volume2 from '@lucide/svelte/icons/volume-2';
+	import Loader2 from '@lucide/svelte/icons/loader-2';
+	import X from '@lucide/svelte/icons/x';
+	import Sparkles from '@lucide/svelte/icons/sparkles';
+	import Hand from '@lucide/svelte/icons/hand';
+	import HandFist from '@lucide/svelte/icons/hand-fist';
+	import Timer from '@lucide/svelte/icons/timer';
 
 	let containerEl = $state<HTMLElement | null>(null);
 	let videoElement = $state<HTMLVideoElement | null>(null);
@@ -21,11 +32,14 @@
 	let facingMode = $state<'user' | 'environment'>('user');
 	let cameraLoading = $state(true);
 	let cameraError = $state<string | null>(null);
+	let isCapturing = $state(false);
 	let ctx: gsap.Context | null = null;
 
 	async function initCamera() {
 		cameraLoading = true;
 		cameraError = null;
+		mediapipePoseService.stop();
+		mediapipeGestureService.stop();
 
 		if (stream) {
 			stream.getTracks().forEach((track) => track.stop());
@@ -34,21 +48,59 @@
 
 		try {
 			if (navigator?.mediaDevices?.getUserMedia) {
-				const mediaStream = await navigator.mediaDevices.getUserMedia({
-					video: {
-						facingMode: facingMode,
-						width: { ideal: 1920 },
-						height: { ideal: 1080 }
-					},
-					audio: false
-				});
+				let mediaStream: MediaStream;
+				try {
+					mediaStream = await navigator.mediaDevices.getUserMedia({
+						video: {
+							facingMode: facingMode,
+							width: { ideal: 1280 },
+							height: { ideal: 720 }
+						},
+						audio: false
+					});
+				} catch (constraintErr) {
+					console.warn('Retrying with basic video constraints:', constraintErr);
+					mediaStream = await navigator.mediaDevices.getUserMedia({
+						video: { facingMode: facingMode },
+						audio: false
+					});
+				}
 
 				stream = mediaStream;
+				cameraLoading = false;
+
 				if (videoElement) {
 					videoElement.srcObject = mediaStream;
-					await videoElement.play().catch(() => {});
+					videoElement.onloadedmetadata = async () => {
+						try {
+							await videoElement?.play();
+							if (videoElement) {
+								mediapipePoseService.start(videoElement);
+								mediapipeGestureService.onShutterTrigger = () => {
+									handleShutter();
+								};
+								mediapipeGestureService.onVoiceQueryTrigger = () => {
+									voiceService.startHandsFreeListening(6);
+								};
+								mediapipeGestureService.start(videoElement);
+							}
+						} catch (e) {
+							console.warn('Video play error on loadedmetadata:', e);
+						}
+					};
+					videoElement.play().then(() => {
+						if (videoElement) {
+							mediapipePoseService.start(videoElement);
+							mediapipeGestureService.onShutterTrigger = () => {
+								handleShutter();
+							};
+							mediapipeGestureService.onVoiceQueryTrigger = () => {
+								voiceService.startHandsFreeListening(6);
+							};
+							mediapipeGestureService.start(videoElement);
+						}
+					}).catch(() => {});
 				}
-				cameraLoading = false;
 			} else {
 				throw new Error('Camera not supported');
 			}
@@ -87,40 +139,62 @@
 		});
 	}
 
+	let lastShutterTimestamp = 0;
+
 	async function handleShutter() {
-		if (shutterBtnEl) {
-			gsap.fromTo(shutterBtnEl, { scale: 0.88 }, { scale: 1, duration: 0.3, ease: 'back.out(2)' });
+		const now = Date.now();
+		if (now - lastShutterTimestamp < 2500) {
+			console.warn('[Shutter] Rapid press debounced (< 2500ms)');
+			return;
+		}
+		if (isCapturing || n8nService.isAnalyzing) {
+			console.warn('[Shutter] Shutter press ignored: capture or analysis already running');
+			return;
 		}
 
-		if (flashEl) {
-			gsap.fromTo(
-				flashEl,
-				{ autoAlpha: 0.8 },
-				{ autoAlpha: 0, duration: 0.25, ease: 'power2.out' }
-			);
-		}
+		lastShutterTimestamp = now;
+		isCapturing = true;
 
-		if (typeof window !== 'undefined' && 'vibrate' in navigator) {
-			try {
-				navigator.vibrate(40);
-			} catch (_) {}
-		}
-
-		const blob = await captureFrameBlob();
-		if (blob) {
-			try {
-				await n8nService.analyzeImage(blob);
-			} catch (e) {
-				console.error('Failed to submit captured photo to n8n:', e);
+		try {
+			if (shutterBtnEl) {
+				gsap.fromTo(shutterBtnEl, { scale: 0.88 }, { scale: 1, duration: 0.3, ease: 'back.out(2)' });
 			}
-		} else {
-			serverState.currentSuggestion = {
-				id: `s-err-${Date.now()}`,
-				text: 'Could not capture photo frame. Ensure camera stream is active.',
-				confidence: 0,
-				category: 'framing',
-				timestamp: new Date().toLocaleTimeString()
-			};
+
+			if (flashEl) {
+				gsap.fromTo(
+					flashEl,
+					{ autoAlpha: 0.8 },
+					{ autoAlpha: 0, duration: 0.25, ease: 'power2.out' }
+				);
+			}
+
+			if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+				try {
+					navigator.vibrate(40);
+				} catch (_) {}
+			}
+
+			const blob = await captureFrameBlob();
+			if (blob) {
+				try {
+					await n8nService.analyzeImage(blob);
+				} catch (e) {
+					console.error('Failed to submit captured photo to n8n:', e);
+				}
+			} else {
+				serverState.currentSuggestion = {
+					id: `s-err-${Date.now()}`,
+					text: 'Could not capture photo frame. Ensure camera stream is active.',
+					confidence: 0,
+					category: 'framing',
+					timestamp: new Date().toLocaleTimeString()
+				};
+			}
+		} finally {
+			// Enforce a strict 2s cooldown so rapid touches never trigger duplicate submissions
+			setTimeout(() => {
+				isCapturing = false;
+			}, 2000);
 		}
 	}
 
@@ -130,25 +204,44 @@
 			serverState.connect();
 		}
 
+		// Pipeline: white box response (with sound chime) -> mic turns on for 5 sec with the sound chime
+		serverState.onAiAnalysisReceived = (analysisText: string) => {
+			if (analysisText) {
+				console.log('[Camera] White box response arrived! Opening 5-second mic listening window in 500ms...');
+				setTimeout(() => {
+					if (!voiceService.isRecording && !voiceService.isPlaying) {
+						voiceService.startHandsFreeListening(5);
+					}
+				}, 500);
+			}
+		};
+
+		mediapipeGestureService.onVoiceQueryTrigger = () => {
+			voiceService.startHandsFreeListening(5);
+		};
+
 		if (containerEl) {
 			ctx = gsap.context(() => {
 				const tl = gsap.timeline({ defaults: { ease: 'power3.out' } });
 
 				tl.from('.top-panel', {
-					y: -30,
-					autoAlpha: 0,
-					duration: 0.6
+					y: -20,
+					opacity: 0.2,
+					duration: 0.5,
+					clearProps: 'all'
 				})
 				.from('.shutter-btn', {
 					scale: 0.7,
-					autoAlpha: 0,
+					opacity: 0.2,
 					duration: 0.5,
-					ease: 'back.out(1.7)'
+					ease: 'back.out(1.7)',
+					clearProps: 'all'
 				}, '-=0.3')
 				.from('.flip-btn', {
 					scale: 0.8,
-					autoAlpha: 0,
-					duration: 0.4
+					opacity: 0.2,
+					duration: 0.4,
+					clearProps: 'all'
 				}, '-=0.3');
 			}, containerEl);
 		}
@@ -156,6 +249,10 @@
 
 	onDestroy(() => {
 		ctx?.revert();
+		voiceService.stopPlayback();
+		voiceService.cancelHandsFreeListening();
+		mediapipePoseService.stop();
+		mediapipeGestureService.stop();
 		if (stream) {
 			stream.getTracks().forEach((track) => track.stop());
 		}
@@ -166,15 +263,15 @@
 		if (currentText && suggestionTextEl) {
 			gsap.fromTo(
 				suggestionTextEl,
-				{ y: 8, autoAlpha: 0 },
-				{ y: 0, autoAlpha: 1, duration: 0.35, ease: 'power2.out' }
+				{ y: 6, opacity: 0.4 },
+				{ y: 0, opacity: 1, duration: 0.3, ease: 'power2.out', clearProps: 'transform,opacity' }
 			);
 		}
 	});
 </script>
 
 <svelte:head>
-	<title>Camera - PoseCam</title>
+	<title>Camera - LadduCam</title>
 </svelte:head>
 
 <div
@@ -196,8 +293,8 @@
 			</div>
 		{:else if cameraError}
 			<div class="flex flex-col items-center justify-center p-6 text-center max-w-xs space-y-3">
-				<div class="size-14 rounded-full bg-muted flex items-center justify-center text-muted-foreground">
-					<CameraIcon class="size-7" />
+				<div class="size-12 rounded-xl bg-muted flex items-center justify-center text-muted-foreground">
+					<CameraIcon class="size-6" />
 				</div>
 				<div class="space-y-1">
 					<h3 class="text-sm font-semibold text-foreground">Camera Unavailable</h3>
@@ -214,67 +311,306 @@
 			playsinline
 			autoplay
 			muted
-			class="w-full h-full object-cover {facingMode === 'user' ? '-scale-x-100' : ''} {cameraLoading || cameraError ? 'hidden' : 'block'}"
+			class="w-full h-full object-cover {facingMode === 'user' ? '-scale-x-100' : ''} {cameraLoading || cameraError ? 'opacity-0' : 'opacity-100'} transition-opacity duration-200"
 		></video>
 	</div>
 
 	<!-- Top Panel: Back Button & Server Suggestion Text -->
 	<header class="top-panel relative z-20 safe-top px-4 pt-3 space-y-2">
-		<div class="flex items-center justify-start">
-			<a
+		<div class="flex items-center justify-between">
+			<!-- Back Navigation Button -->
+			<Button
+				variant="outline"
+				size="icon"
 				href="/"
-				class="size-9 rounded-full bg-background/80 backdrop-blur border border-border flex items-center justify-center text-foreground hover:bg-muted transition-colors"
+				class="size-8 rounded-md bg-background/80 backdrop-blur-sm border-border/80 shadow-xs text-foreground hover:bg-muted"
 				aria-label="Back"
 			>
 				<ArrowLeft class="size-4" />
-			</a>
+			</Button>
+
+			<!-- Hands-Free Gesture Shutter & Timer Controls (Shadcn Segmented Toolbar) -->
+			<div class="inline-flex items-center gap-1 rounded-lg border border-border/80 bg-background/80 p-0.5 backdrop-blur-sm shadow-xs">
+				<!-- Hands-Free Toggle Button -->
+				<Button
+					variant={mediapipeGestureService.isEnabled ? "secondary" : "ghost"}
+					size="sm"
+					onclick={() => mediapipeGestureService.toggleEnabled()}
+					class="h-7 px-2.5 rounded-md text-xs font-medium gap-1.5 transition-colors {mediapipeGestureService.isEnabled ? 'text-foreground' : 'text-muted-foreground'}"
+					aria-label="Toggle Gesture Shutter"
+				>
+					<Hand class="size-3.5 shrink-0" />
+					<span class="tracking-tight font-sans">Hands-Free</span>
+					<span
+						class="size-1.5 rounded-full {mediapipeGestureService.isEnabled ? 'bg-emerald-500 ring-2 ring-emerald-500/20' : 'bg-muted-foreground/30'}"
+					></span>
+				</Button>
+
+				<div class="h-3.5 w-px bg-border/80"></div>
+
+				<!-- Countdown Timer Toggle Button -->
+				<Button
+					variant={mediapipeGestureService.timerDuration > 0 ? "secondary" : "ghost"}
+					size="sm"
+					onclick={() => mediapipeGestureService.toggleTimer()}
+					class="h-7 px-2 rounded-md font-mono text-xs gap-1 transition-colors {mediapipeGestureService.timerDuration > 0 ? 'text-foreground' : 'text-muted-foreground'}"
+					aria-label="Toggle Countdown Timer"
+				>
+					<Timer class="size-3.5 shrink-0" />
+					<span class="tabular-nums font-semibold">
+						{mediapipeGestureService.timerDuration > 0 ? `${mediapipeGestureService.timerDuration}s` : 'Off'}
+					</span>
+				</Button>
+			</div>
 		</div>
 
 		<!-- Server Suggestion Box -->
-		<div class="w-full rounded-xl bg-background/85 backdrop-blur-md border border-border p-3.5 shadow-lg">
+		<div class="w-full rounded-lg bg-card/90 backdrop-blur-md border border-border p-3 shadow-xs">
 			<div class="flex items-center justify-between mb-1">
-				<span class="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+				<span class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5 font-sans">
 					{#if n8nService.isAnalyzing}
-						<RefreshCw class="size-3 animate-spin text-amber-400" />
-						<span class="text-amber-400 font-bold">n8n AI Analyzing...</span>
+						<RefreshCw class="size-3 animate-spin text-primary" />
+						<span class="text-primary font-medium">Analyzing...</span>
 					{:else}
 						<span>AI Suggestion</span>
 					{/if}
 				</span>
 				{#if serverState.isConnected}
-					<span class="text-[11px] font-mono text-muted-foreground">
-						{serverState.latency} ms
+					<span class="text-[11px] font-mono tabular-nums text-muted-foreground">
+						{serverState.latency}ms
 					</span>
 				{/if}
 			</div>
-			<p bind:this={suggestionTextEl} class="text-sm font-medium leading-relaxed text-foreground max-h-36 overflow-y-auto pr-1">
+			<p bind:this={suggestionTextEl} class="text-sm font-normal leading-relaxed text-card-foreground max-h-36 overflow-y-auto pr-1">
 				{serverState.currentSuggestion.text}
 			</p>
 		</div>
 	</header>
 
-	<!-- Bottom Panel: Shutter & Camera Switch -->
-	<footer class="relative z-20 safe-bottom px-8 pb-6 flex items-center justify-between">
-		<div class="size-11"></div>
+	<!-- Gesture Status Callout Card (Shadcn Notification) -->
+	{#if mediapipeGestureService.isEnabled && (mediapipeGestureService.gesturePhase === 'hand_raised' || mediapipeGestureService.gesturePhase === 'fist_clamped')}
+		<div class="absolute top-44 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+			<div
+				class="flex items-center gap-2.5 rounded-lg border border-border/80 bg-background/95 px-3 py-1.5 shadow-md backdrop-blur-md text-foreground transition-all duration-200 animate-in fade-in slide-in-from-top-1"
+			>
+				{#if mediapipeGestureService.gesturePhase === 'hand_raised'}
+					<span class="relative flex size-2 shrink-0">
+						<span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75"></span>
+						<span class="relative inline-flex size-2 rounded-full bg-emerald-500"></span>
+					</span>
+					<div class="flex items-center gap-1.5 text-xs">
+						<span class="font-mono text-[10px] uppercase font-semibold text-muted-foreground tracking-wider">Hand Detected</span>
+						<span class="text-border">·</span>
+						<span class="font-medium text-foreground">Clench fist to snap</span>
+					</div>
+				{:else if mediapipeGestureService.gesturePhase === 'fist_clamped'}
+					<span class="relative flex size-2 shrink-0">
+						<span class="relative inline-flex size-2 rounded-full bg-primary"></span>
+					</span>
+					<div class="flex items-center gap-1.5 text-xs">
+						<span class="font-mono text-[10px] uppercase font-semibold text-primary tracking-wider">Fist Clenched</span>
+						<span class="text-border">·</span>
+						<span class="font-medium text-foreground">Capturing photo</span>
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
 
-		<!-- Simple Shutter Button -->
-		<button
-			bind:this={shutterBtnEl}
-			onclick={handleShutter}
-			class="shutter-btn size-18 rounded-full border-4 border-white p-1 flex items-center justify-center active:scale-95 transition-transform focus:outline-none"
-			aria-label="Shutter"
-		>
-			<span class="size-full rounded-full bg-white active:bg-zinc-200"></span>
-		</button>
+	<!-- Fullscreen Countdown Overlay (Shadcn Typography & Aesthetics) -->
+	{#if mediapipeGestureService.gesturePhase === 'counting_down'}
+		<div class="absolute inset-0 z-40 flex flex-col items-center justify-center bg-background/60 backdrop-blur-xs animate-in fade-in duration-150">
+			<div class="rounded-xl border border-border/80 bg-card/95 backdrop-blur-md p-6 shadow-2xl flex flex-col items-center gap-4 text-center max-w-[240px] w-full animate-in zoom-in-95 fade-in duration-200">
+				<div class="flex items-center gap-1.5 text-[11px] font-mono font-medium uppercase tracking-wider text-muted-foreground">
+					<CameraIcon class="size-3.5" />
+					<span>Hands-Free</span>
+				</div>
 
-		<!-- Flip Camera -->
-		<button
-			bind:this={flipBtnEl}
-			onclick={toggleCameraFacing}
-			class="flip-btn size-11 rounded-full bg-background/80 backdrop-blur border border-border flex items-center justify-center text-foreground active:scale-95 transition-transform"
-			aria-label="Flip Camera"
-		>
-			<FlipHorizontal class="size-5" />
-		</button>
+				<div class="py-1">
+					<span class="text-7xl font-mono font-bold tracking-tighter text-foreground tabular-nums select-none leading-none">
+						{mediapipeGestureService.countdownRemaining}
+					</span>
+				</div>
+
+				<div class="w-full space-y-2">
+					<div class="flex items-center justify-between text-[11px] text-muted-foreground font-mono">
+						<span>Pose ready</span>
+						<span>{mediapipeGestureService.countdownRemaining}s</span>
+					</div>
+					<!-- Minimal Progress Indicator -->
+					<div class="h-1 w-full overflow-hidden rounded-xs bg-muted">
+						<div
+							class="h-full bg-primary transition-all duration-300 ease-out"
+							style="width: {((mediapipeGestureService.countdownRemaining) / (mediapipeGestureService.timerDuration || 3)) * 100}%"
+						></div>
+					</div>
+				</div>
+
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={() => mediapipeGestureService.cancel()}
+					class="w-full h-7 rounded-md text-xs font-medium border-border/80 text-muted-foreground hover:text-foreground"
+				>
+					Cancel
+				</Button>
+			</div>
+		</div>
+	{/if}
+
+	<!-- Bottom Panel: Shutter, Mic & Camera Switch -->
+	<footer class="relative z-20 safe-bottom px-6 pb-6 flex flex-col items-center gap-3">
+		<!-- Floating Voice Status (Shadcn Typography & Geometry) -->
+		{#if voiceService.isAutoListening}
+			<div
+				class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-lg text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
+			>
+				<span class="relative flex size-2 shrink-0">
+					<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>
+					<span class="relative inline-flex rounded-full size-2 bg-emerald-500"></span>
+				</span>
+				<div class="flex items-center gap-2 text-xs">
+					<span class="font-mono text-[10px] uppercase font-semibold text-emerald-500 tracking-wider">Listening</span>
+					<span class="text-border">·</span>
+					<span class="font-medium text-foreground">"Hey photo nallathano?"</span>
+					<span class="text-border">·</span>
+					<span class="font-mono text-[11px] tabular-nums text-muted-foreground">{voiceService.autoListenRemaining}s</span>
+				</div>
+			</div>
+		{:else if voiceService.isPlaying}
+			<div
+				class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-md text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
+			>
+				<Volume2 class="size-3.5 text-primary animate-pulse shrink-0" />
+				<div class="flex items-center gap-1.5 text-xs">
+					<span class="font-mono text-[10px] uppercase font-semibold text-primary tracking-wider">Responding</span>
+					<span class="text-border">·</span>
+					<span class="font-medium text-foreground">Malayalam voice advice</span>
+				</div>
+			</div>
+		{:else if voiceService.isProcessing}
+			<div
+				class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-md text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
+			>
+				<Loader2 class="size-3.5 text-primary animate-spin shrink-0" />
+				<span class="text-xs font-medium text-foreground">{voiceService.statusMessage}</span>
+			</div>
+		{:else if voiceService.isRecording}
+			<div
+				class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-destructive/40 shadow-md text-destructive transition-all animate-in fade-in slide-in-from-bottom-2"
+			>
+				<span class="relative flex size-2 shrink-0">
+					<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-destructive opacity-75"></span>
+					<span class="relative inline-flex rounded-full size-2 bg-destructive"></span>
+				</span>
+				<span class="text-xs font-semibold uppercase tracking-wider font-mono">
+					Recording {voiceService.formattedDuration}
+				</span>
+				<span class="text-[11px] text-muted-foreground font-normal">(Release to send)</span>
+			</div>
+		{:else if voiceService.state === 'error'}
+			<div
+				class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-destructive/40 shadow-md transition-all animate-in fade-in slide-in-from-bottom-2"
+			>
+				<span class="text-xs font-medium text-destructive">
+					{voiceService.statusMessage}
+				</span>
+			</div>
+		{/if}
+
+		<!-- Persistent Whiter AI Analysis Bubble (n8n / ShutterMuse Server Output) -->
+		{#if serverState.aiAnalysis && serverState.aiAnalysis.visible}
+			<div
+				class="w-full rounded-2xl bg-white text-zinc-950 border border-zinc-200 shadow-2xl p-4 transition-all duration-300 animate-in fade-in slide-in-from-bottom-3 backdrop-blur-md dark:bg-zinc-100 dark:text-zinc-900 dark:border-zinc-300 select-text"
+			>
+				<div class="flex items-center justify-between pb-1.5 border-b border-zinc-200/80 mb-2">
+					<div class="flex items-center gap-1.5">
+						<Sparkles class="size-3.5 text-amber-500 fill-amber-500/20" />
+						<span class="text-xs font-bold uppercase tracking-wider text-zinc-800 font-mono">
+							AI Composition Advice
+						</span>
+					</div>
+					<div class="flex items-center gap-2">
+						<span class="text-[10px] text-zinc-500 font-mono">
+							{serverState.aiAnalysis.timestamp}
+						</span>
+						<button
+							type="button"
+							onclick={() => serverState.dismissAiAnalysis()}
+							class="size-6 rounded-md hover:bg-zinc-200/80 active:scale-95 flex items-center justify-center text-zinc-500 hover:text-zinc-900 transition-colors"
+							aria-label="Close AI advice"
+						>
+							<X class="size-3.5" />
+						</button>
+					</div>
+				</div>
+				<p class="text-xs sm:text-sm font-medium leading-relaxed text-zinc-900 max-h-48 overflow-y-auto pr-1">
+					{serverState.aiAnalysis.text}
+				</p>
+			</div>
+		{/if}
+
+		<div class="w-full flex items-center justify-between">
+			<!-- Mic Button (Press and hold with Shadcn Design Language) -->
+			<div class="relative size-12 shrink-0 flex items-center justify-center">
+				{#if voiceService.isRecording}
+					<span class="absolute inset-0 rounded-lg bg-destructive/30 animate-ping"></span>
+				{/if}
+				<button
+					type="button"
+					aria-label="Hold to record voice note"
+					onpointerdown={(e) => {
+						try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
+						voiceService.startRecording();
+					}}
+					onpointerup={(e) => {
+						try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+						voiceService.stopRecordingAndSend();
+					}}
+					onpointercancel={(e) => {
+						try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+						voiceService.stopRecordingAndSend();
+					}}
+					class="mic-btn size-11 shrink-0 rounded-lg border border-border/80 flex items-center justify-center select-none touch-none focus:outline-none transition-all active:scale-95 {voiceService.isRecording ? 'bg-destructive border-destructive text-white scale-105 shadow-md shadow-destructive/40' : voiceService.isProcessing ? 'bg-amber-500/20 border-amber-500/40 text-amber-400' : voiceService.isPlaying ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400' : 'bg-background/80 backdrop-blur-sm border-border text-foreground shadow-xs hover:bg-muted'}"
+				>
+					{#if voiceService.isRecording}
+						<Mic class="size-5 animate-pulse text-white" />
+					{:else if voiceService.isProcessing}
+						<Loader2 class="size-5 animate-spin" />
+					{:else if voiceService.isPlaying}
+						<Volume2 class="size-5 animate-bounce" />
+					{:else}
+						<Mic class="size-5 text-foreground" />
+					{/if}
+				</button>
+			</div>
+
+			<!-- Shutter Button -->
+			<button
+				bind:this={shutterBtnEl}
+				onclick={handleShutter}
+				disabled={isCapturing || n8nService.isAnalyzing}
+				class="shutter-btn size-18 rounded-full border-4 border-white p-1 flex items-center justify-center active:scale-95 transition-all focus:outline-none {isCapturing || n8nService.isAnalyzing ? 'opacity-50 pointer-events-none' : ''}"
+				aria-label="Shutter"
+			>
+				<span class="size-full rounded-full bg-white active:bg-zinc-200 flex items-center justify-center">
+					{#if isCapturing || n8nService.isAnalyzing}
+						<Loader2 class="size-6 animate-spin text-zinc-900" />
+					{/if}
+				</span>
+			</button>
+
+			<!-- Flip Camera Button -->
+			<Button
+				variant="outline"
+				size="icon"
+				bind:ref={flipBtnEl}
+				onclick={toggleCameraFacing}
+				class="flip-btn size-11 rounded-lg bg-background/80 backdrop-blur-sm border-border/80 shadow-xs text-foreground active:scale-95 transition-transform"
+				aria-label="Flip Camera"
+			>
+				<FlipHorizontal class="size-5" />
+			</Button>
+		</div>
 	</footer>
 </div>

@@ -29,3 +29,19 @@ android/captures/
 Thumbs.db
 .vscode/
 .idea/
+
+# Model Weights & Data
+ShutterMuse-4bit/
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.task
+*.wasm
+**/static/mediapipe/
+
+
+

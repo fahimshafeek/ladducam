@@ -21,6 +21,11 @@ class DesktopServerStore {
 	fps = $state(30);
 	framesProcessed = $state(0);
 	currentPoseSuggestion = $state('Tilt your chin down slightly (about 5°) and look at the upper lens.');
+	lastVoiceEvent = $state<{
+		type: string;
+		time: string;
+		message: string;
+	} | null>(null);
 	logs = $state<LogEntry[]>([
 		{
 			id: '1',
@@ -123,6 +128,23 @@ class DesktopServerStore {
 							if (wasConnected) {
 								this.addLog('info', 'Mobile client disconnected');
 							}
+						}
+					}
+
+					if (data.type === 'log_entry') {
+						this.addLog(data.level || 'info', data.message);
+						this.lastVoiceEvent = {
+							type: data.level || 'info',
+							time: data.time || new Date().toLocaleTimeString(),
+							message: data.message
+						};
+					}
+
+					if (data.type === 'pose_suggestion' || data.type === 'server_suggestion') {
+						const suggestionText = data.clean_text || data.text || (Array.isArray(data.tips) ? data.tips.join(' • ') : null);
+						if (suggestionText) {
+							this.currentPoseSuggestion = suggestionText;
+							this.addLog('success', `AI Suggestion: ${suggestionText}`);
 						}
 					}
 				} catch (err) {

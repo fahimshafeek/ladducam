@@ -62,7 +62,7 @@
 </script>
 
 <svelte:head>
-	<title>PoseCam</title>
+	<title>LadduCam</title>
 </svelte:head>
 
 <div

@@ -3,12 +3,21 @@
  * Handles real WebSocket connection to the workstation server (ws://<ip>:<port>)
  */
 
+import { chime } from './chime.js';
+
 export interface ServerSuggestion {
 	id: string;
 	text: string;
 	confidence: number;
 	category: 'head' | 'shoulders' | 'lighting' | 'framing' | 'expression';
 	timestamp: string;
+}
+
+export interface AiAnalysisEntry {
+	id: string;
+	text: string;
+	timestamp: string;
+	visible: boolean;
 }
 
 const DEFAULT_SUGGESTIONS: Omit<ServerSuggestion, 'id' | 'timestamp'>[] = [
@@ -69,7 +78,7 @@ class ServerStore {
 	port = $state('8080');
 	status = $state<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
 	latency = $state<number | null>(null);
-	serverName = $state('PoseCam Server');
+	serverName = $state('LadduCam Server');
 	fps = $state(30);
 	connectedAt = $state<Date | null>(null);
 	lastPingAt = $state<Date | null>(null);
@@ -84,8 +93,18 @@ class ServerStore {
 		timestamp: new Date().toLocaleTimeString()
 	});
 
+	// Persistent AI Analysis bubble from n8n / ShutterMuse server
+	aiAnalysis = $state<AiAnalysisEntry | null>(null);
+	private aiAnalysisTimer: ReturnType<typeof setTimeout> | null = null;
+
 	suggestionIndex = $state(0);
 	autoSuggestActive = $state(true);
+
+	// Voice-to-Voice Callbacks
+	onVoiceResponse: ((audio: string, format: string) => void) | null = null;
+	onVoiceStatus: ((status: string, message: string) => void) | null = null;
+	onVoiceError: ((error: string) => void) | null = null;
+	onAiAnalysisReceived: ((text: string) => void) | null = null;
 
 	private socket: WebSocket | null = null;
 	private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -152,7 +171,7 @@ class ServerStore {
 					JSON.stringify({
 						type: 'identify',
 						role: 'mobile',
-						device: 'PoseCam Mobile',
+						device: 'LadduCam Mobile',
 						timestamp: Date.now()
 					})
 				);
@@ -168,6 +187,23 @@ class ServerStore {
 						const rtt = Date.now() - data.timestamp;
 						this.latency = Math.max(1, rtt);
 						this.lastPingAt = new Date();
+					} else if (data.type === 'voice_status') {
+						if (this.onVoiceStatus) this.onVoiceStatus(data.status, data.message);
+					} else if (data.type === 'pose_suggestion' || data.type === 'server_suggestion') {
+						const suggestionText = data.clean_text || data.text || (Array.isArray(data.tips) ? data.tips.join(' • ') : '');
+						if (suggestionText) {
+							this.setAiAnalysis(suggestionText);
+						}
+					} else if (data.type === 'voice_response') {
+						const responseText = data.clean_text || data.text;
+						if (responseText) {
+							this.setAiAnalysis(responseText);
+						}
+						if (data.audio && this.onVoiceResponse) {
+							this.onVoiceResponse(data.audio, data.format || 'mp3');
+						}
+					} else if (data.type === 'voice_error') {
+						if (this.onVoiceError) this.onVoiceError(data.error || 'Server processing error');
 					} else if (data.server) {
 						this.serverName = data.server;
 					}
@@ -242,6 +278,112 @@ class ServerStore {
 					timestamp: Date.now()
 				})
 			);
+		}
+	}
+
+	sendVoiceNote(wavBase64: string, durationMs: number, explicitContext?: any): boolean {
+		if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+			this.connect();
+			return false;
+		}
+
+		try {
+			const photoContext = explicitContext || (this.aiAnalysis?.text ? {
+				text: this.aiAnalysis.text,
+				timestamp: this.aiAnalysis.timestamp
+			} : null);
+
+			this.socket.send(
+				JSON.stringify({
+					type: 'voice_note',
+					audio: wavBase64,
+					format: 'wav',
+					duration: durationMs,
+					filename: 'voice_note.wav',
+					photo_context: photoContext,
+					timestamp: Date.now()
+				})
+			);
+			return true;
+		} catch (err) {
+			console.error('Failed to send voice note over WebSocket:', err);
+			return false;
+		}
+	}
+
+	setRealSuggestion(text: string, category: ServerSuggestion['category'] = 'framing') {
+		if (!text) return;
+		this.currentSuggestion = {
+			id: `s-server-${Date.now()}`,
+			text: text.trim(),
+			confidence: 99,
+			category: category,
+			timestamp: new Date().toLocaleTimeString()
+		};
+		// Pause rotating canned suggestions
+		this.stopSuggestionStream();
+	}
+
+	setAiAnalysis(text: string, persistenceMs = 45000) {
+		if (!text) return;
+		if (this.aiAnalysisTimer) {
+			clearTimeout(this.aiAnalysisTimer);
+			this.aiAnalysisTimer = null;
+		}
+
+		this.aiAnalysis = {
+			id: `ai-${Date.now()}`,
+			text: text.trim(),
+			timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+			visible: true
+		};
+
+		// Longer persistence (default 45s) for comfortable reading; 0 keeps it visible indefinitely
+		if (persistenceMs > 0) {
+			this.aiAnalysisTimer = setTimeout(() => {
+				if (this.aiAnalysis) {
+					this.aiAnalysis.visible = false;
+				}
+				this.aiAnalysisTimer = null;
+			}, persistenceMs);
+		}
+
+		// Play friendly white box response chime and notify callback for hands-free Malayalam voice auto-listen
+		if (!text.includes('Analyzing frame')) {
+			chime.playWhiteBoxArrivalChime();
+			if (this.onAiAnalysisReceived) {
+				this.onAiAnalysisReceived(this.aiAnalysis.text);
+			}
+		}
+	}
+
+	dismissAiAnalysis() {
+		if (this.aiAnalysisTimer) {
+			clearTimeout(this.aiAnalysisTimer);
+			this.aiAnalysisTimer = null;
+		}
+		if (this.aiAnalysis) {
+			this.aiAnalysis.visible = false;
+		}
+	}
+
+	sendFrame(base64Image: string): boolean {
+		if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+			this.connect();
+			return false;
+		}
+		try {
+			this.socket.send(
+				JSON.stringify({
+					type: 'analyze_frame',
+					image: base64Image,
+					timestamp: Date.now()
+				})
+			);
+			return true;
+		} catch (err) {
+			console.error('Failed to send frame over WebSocket:', err);
+			return false;
 		}
 	}
 

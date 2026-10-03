@@ -68,7 +68,7 @@
 </script>
 
 <svelte:head>
-	<title>PoseCam Desktop Server</title>
+	<title>LadduCam Desktop Server</title>
 </svelte:head>
 
 <div
@@ -81,10 +81,10 @@
 			<img src={logo} alt="Laddu Lens" class="size-14 rounded-2xl object-contain shadow-sm" />
 			<div>
 				<h1 class="scroll-m-20 text-2xl font-bold tracking-tight text-foreground">
-					PoseCam Server
+					LadduCam Server
 				</h1>
 				<p class="text-sm text-muted-foreground">
-					Local compute node for PoseCam Mobile
+					Local compute node for LadduCam Mobile
 				</p>
 			</div>
 		</div>
@@ -218,7 +218,7 @@
 						</h2>
 						<p class="text-sm text-muted-foreground">
 							{#if !serverStore.isServerRunning}
-								Server is stopped. Start the server to accept connections from PoseCam Mobile.
+								Server is stopped. Start the server to accept connections from LadduCam Mobile.
 							{:else if serverStore.isClientConnected}
 								Receiving camera stream from {serverStore.clientDeviceName}.
 							{:else}
@@ -250,10 +250,6 @@
 				</CardContent>
 			</Card>
 		</div>
-	</main>
 
-	<!-- Footer -->
-	<footer class="text-center text-xs text-muted-foreground pt-4 border-t border-border/50">
-		PoseCam Workstation Compute Engine • SvelteKit & Tauri Desktop Companion
-	</footer>
+	</main>
 </div>

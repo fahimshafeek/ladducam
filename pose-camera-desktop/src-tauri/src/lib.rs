@@ -82,7 +82,7 @@ pub fn run() {
                                 "type": "client_state",
                                 "connected": true,
                                 "client_ip": client_ip,
-                                "device": "PoseCam Mobile"
+                                "device": "LadduCam Mobile"
                             }).to_string();
                             let _ = tx_clone.send(state_msg);
                         }
@@ -91,7 +91,7 @@ pub fn run() {
                         let welcome = json!({
                             "type": "welcome",
                             "status": "connected",
-                            "server": "PoseCam Server (Rust)",
+                            "server": "LadduCam Server (Rust)",
                             "client_ip": client_ip,
                             "lan_ip": get_host_lan_ip()
                         }).to_string();
@@ -118,6 +118,80 @@ pub fn run() {
                                                 if let Some(ts) = json_val.get("timestamp").and_then(|t| t.as_u64()) {
                                                     rtt_ts = Some(ts);
                                                 }
+
+                                                if json_val.get("type").and_then(|t| t.as_str()) == Some("voice_note") {
+                                                    if let Some(audio_base64) = json_val.get("audio").and_then(|a| a.as_str()) {
+                                                        use base64::Engine;
+                                                        let wav_bytes = base64::engine::general_purpose::STANDARD.decode(audio_base64).unwrap_or_default();
+                                                        if !wav_bytes.is_empty() {
+                                                            let temp_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+                                                            let wav_path = format!("/tmp/voice_tauri_{}.wav", temp_id);
+                                                            let mp3_path = format!("/tmp/voice_tauri_{}.mp3", temp_id);
+                                                            let _ = tokio::fs::write(&wav_path, &wav_bytes).await;
+
+                                                            let log_msg = json!({
+                                                                "type": "log_entry",
+                                                                "level": "info",
+                                                                "message": format!("Received voice note ({} KB). Forwarding to n8n...", wav_bytes.len() / 1024),
+                                                                "time": ""
+                                                            }).to_string();
+                                                            let _ = tx_clone.send(log_msg);
+
+                                                            let status_msg = json!({
+                                                                "type": "voice_status",
+                                                                "status": "processing",
+                                                                "message": "Workstation compute: Processing voice with n8n..."
+                                                            }).to_string();
+                                                            let _ = ws_stream.send(Message::Text(status_msg.into())).await;
+
+                                                            let test_url = "http://localhost:5678/webhook-test/getvoice";
+                                                            let prod_url = "http://localhost:5678/webhook/getvoice";
+
+                                                            let mut success = false;
+                                                            let cmd_test = tokio::process::Command::new("curl")
+                                                                .args(["-s", "-w", "%{http_code}", "-X", "POST", "-F", &format!("file=@{}", wav_path), test_url, "-o", &mp3_path])
+                                                                .output().await;
+
+                                                            if let Ok(out) = cmd_test {
+                                                                let code = String::from_utf8_lossy(&out.stdout);
+                                                                if code.trim() == "200" {
+                                                                    success = true;
+                                                                }
+                                                            }
+
+                                                            if !success {
+                                                                let _ = tokio::process::Command::new("curl")
+                                                                    .args(["-s", "-X", "POST", "-F", &format!("file=@{}", wav_path), prod_url, "-o", &mp3_path])
+                                                                    .output().await;
+                                                            }
+
+                                                            if let Ok(mp3_bytes) = tokio::fs::read(&mp3_path).await {
+                                                                if !mp3_bytes.is_empty() {
+                                                                    let mp3_b64 = base64::engine::general_purpose::STANDARD.encode(&mp3_bytes);
+                                                                    let resp = json!({
+                                                                        "type": "voice_response",
+                                                                        "audio": mp3_b64,
+                                                                        "format": "mp3",
+                                                                        "timestamp": temp_id
+                                                                    }).to_string();
+                                                                    let _ = ws_stream.send(Message::Text(resp.into())).await;
+
+                                                                    let success_log = json!({
+                                                                        "type": "log_entry",
+                                                                        "level": "success",
+                                                                        "message": format!("Voice pipeline completed: Generated {} KB MP3. Sent to mobile.", mp3_bytes.len() / 1024),
+                                                                        "time": ""
+                                                                    }).to_string();
+                                                                    let _ = tx_clone.send(success_log);
+                                                                }
+                                                            }
+
+                                                            let _ = tokio::fs::remove_file(&wav_path).await;
+                                                            let _ = tokio::fs::remove_file(&mp3_path).await;
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
                                             }
 
                                             if is_mobile_msg || !is_loopback {
@@ -125,7 +199,7 @@ pub fn run() {
                                                     "type": "client_state",
                                                     "connected": true,
                                                     "client_ip": client_ip,
-                                                    "device": "PoseCam Mobile"
+                                                    "device": "LadduCam Mobile"
                                                 }).to_string();
                                                 let _ = tx_clone.send(notify);
                                             }
@@ -133,7 +207,7 @@ pub fn run() {
                                             let response = json!({
                                                 "type": "pong",
                                                 "timestamp": rtt_ts.unwrap_or(0),
-                                                "server": "PoseCam Server",
+                                                "server": "LadduCam Server",
                                                 "status": "connected"
                                             }).to_string();
 
