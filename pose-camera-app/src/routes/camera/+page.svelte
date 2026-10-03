@@ -20,6 +20,11 @@
 	import Hand from '@lucide/svelte/icons/hand';
 	import HandFist from '@lucide/svelte/icons/hand-fist';
 	import Timer from '@lucide/svelte/icons/timer';
+	import ScanLine from '@lucide/svelte/icons/scan-line';
+	import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+	import Check from '@lucide/svelte/icons/check';
+	import { sceneWireframeService } from '$lib/scene-wireframe-service.svelte.js';
+	import { chime } from '$lib/chime.js';
 
 	let containerEl = $state<HTMLElement | null>(null);
 	let videoElement = $state<HTMLVideoElement | null>(null);
@@ -27,6 +32,18 @@
 	let flipBtnEl = $state<HTMLButtonElement | null>(null);
 	let flashEl = $state<HTMLDivElement | null>(null);
 	let suggestionTextEl = $state<HTMLParagraphElement | null>(null);
+
+	// Experimental Empty Scene Wireframe Mode state
+	let isSceneWireframeMode = $state(false);
+	let wireframeState = $state<'idle' | 'processing' | 'revealed'>('idle');
+	let frozenShotUrl = $state<string | null>(null);
+	let wireframeResultUrl = $state<string | null>(null);
+	let wireframeScopeEl = $state<HTMLDivElement | null>(null);
+	let frozenImgEl = $state<HTMLImageElement | null>(null);
+	let wireframeImgEl = $state<HTMLImageElement | null>(null);
+	let scanBeamEl = $state<HTMLDivElement | null>(null);
+	let wireframeCardEl = $state<HTMLDivElement | null>(null);
+	let wireframeTimelineCtx: gsap.Context | null = null;
 
 	let stream = $state<MediaStream | null>(null);
 	let facingMode = $state<'user' | 'environment'>('user');
@@ -80,7 +97,9 @@
 									handleShutter();
 								};
 								mediapipeGestureService.onVoiceQueryTrigger = () => {
-									voiceService.startHandsFreeListening(6);
+									if (!isSceneWireframeMode) {
+										voiceService.startHandsFreeListening(6);
+									}
 								};
 								mediapipeGestureService.start(videoElement);
 							}
@@ -95,7 +114,9 @@
 								handleShutter();
 							};
 							mediapipeGestureService.onVoiceQueryTrigger = () => {
-								voiceService.startHandsFreeListening(6);
+								if (!isSceneWireframeMode) {
+									voiceService.startHandsFreeListening(6);
+								}
 							};
 							mediapipeGestureService.start(videoElement);
 						}
@@ -139,6 +160,108 @@
 		});
 	}
 
+	function toggleSceneWireframeMode() {
+		if (wireframeState === 'processing') return;
+		if (wireframeState === 'revealed') {
+			resetWireframeMode(false);
+			return;
+		}
+		isSceneWireframeMode = !isSceneWireframeMode;
+		// Completely silence & stop any audio/mic activities
+		voiceService.stopPlayback();
+		voiceService.cancelHandsFreeListening();
+		serverState.dismissAiAnalysis();
+		if (isSceneWireframeMode) {
+			if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+				try { navigator.vibrate(30); } catch (_) {}
+			}
+		}
+	}
+
+	function resetWireframeMode(stayInSceneMode = true) {
+		wireframeTimelineCtx?.revert();
+		if (frozenShotUrl) {
+			try { URL.revokeObjectURL(frozenShotUrl); } catch (_) {}
+			frozenShotUrl = null;
+		}
+		wireframeResultUrl = null;
+		wireframeState = 'idle';
+		sceneWireframeService.cleanup();
+		voiceService.stopPlayback();
+		voiceService.cancelHandsFreeListening();
+		serverState.dismissAiAnalysis();
+		if (!stayInSceneMode) {
+			isSceneWireframeMode = false;
+		}
+	}
+
+	function triggerWireframeTransition() {
+		if (!wireframeScopeEl) return;
+		wireframeTimelineCtx?.revert();
+
+		wireframeTimelineCtx = gsap.context(() => {
+			const tl = gsap.timeline({
+				defaults: { ease: 'power2.out' }
+			});
+
+			// Setup starting properties using GSAP best practices
+			gsap.set(wireframeImgEl, {
+				autoAlpha: 0,
+				scale: 1.015,
+				filter: 'brightness(1.15)'
+			});
+			gsap.set(wireframeCardEl, {
+				autoAlpha: 0,
+				y: 20
+			});
+			gsap.set(scanBeamEl, {
+				autoAlpha: 0,
+				yPercent: -100
+			});
+
+			// 1. Subtle scale punch on the frozen shot frame
+			tl.to(frozenImgEl, {
+				scale: 1.015,
+				duration: 0.35,
+				ease: 'power2.out'
+			});
+
+			// 2. Minimalist light sweep across the frame
+			tl.fromTo(
+				scanBeamEl,
+				{ autoAlpha: 0.7, yPercent: -100 },
+				{ autoAlpha: 1, yPercent: 220, duration: 0.75, ease: 'power1.inOut' },
+				'-=0.15'
+			);
+
+			// 3. Smooth cross-dissolve & settle into the wireframe image
+			tl.to(
+				wireframeImgEl,
+				{
+					autoAlpha: 1,
+					scale: 1.0,
+					filter: 'brightness(1.0)',
+					duration: 0.7,
+					ease: 'power3.out'
+				},
+				'-=0.4'
+			);
+
+			// 4. Reveal recommendation action card and controls at the bottom
+			tl.to(
+				wireframeCardEl,
+				{
+					autoAlpha: 1,
+					y: 0,
+					duration: 0.45,
+					ease: 'power3.out',
+					clearProps: 'transform'
+				},
+				'-=0.2'
+			);
+		}, wireframeScopeEl);
+	}
+
 	let lastShutterTimestamp = 0;
 
 	async function handleShutter() {
@@ -147,8 +270,59 @@
 			console.warn('[Shutter] Rapid press debounced (< 2500ms)');
 			return;
 		}
-		if (isCapturing || n8nService.isAnalyzing) {
+		if (isCapturing || n8nService.isAnalyzing || sceneWireframeService.isGenerating) {
 			console.warn('[Shutter] Shutter press ignored: capture or analysis already running');
+			return;
+		}
+
+		// Empty Scene Wireframe Mode execution path (Audio/mic & AI text bubbles completely disabled)
+		if (isSceneWireframeMode) {
+			lastShutterTimestamp = now;
+			isCapturing = true;
+
+			try {
+				if (shutterBtnEl) {
+					gsap.fromTo(shutterBtnEl, { scale: 0.88 }, { scale: 1, duration: 0.3, ease: 'back.out(2)' });
+				}
+
+				if (flashEl) {
+					gsap.fromTo(
+						flashEl,
+						{ autoAlpha: 0.85 },
+						{ autoAlpha: 0, duration: 0.25, ease: 'power2.out' }
+					);
+				}
+
+				if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+					try { navigator.vibrate(40); } catch (_) {}
+				}
+
+				const blob = await captureFrameBlob();
+				if (!blob) {
+					console.error('Could not capture scene frame');
+					return;
+				}
+
+				// Immediately freeze the captured frame
+				frozenShotUrl = URL.createObjectURL(blob);
+				wireframeState = 'processing';
+
+				const result = await sceneWireframeService.generateSceneWireframe(blob);
+				if (result.success && result.imageUrl) {
+					wireframeResultUrl = result.imageUrl;
+					wireframeState = 'revealed';
+					chime.playWhiteBoxArrivalChime();
+					setTimeout(() => {
+						triggerWireframeTransition();
+					}, 60);
+				} else {
+					console.error('Wireframe generation failed:', result.error);
+				}
+			} finally {
+				setTimeout(() => {
+					isCapturing = false;
+				}, 1500);
+			}
 			return;
 		}
 
@@ -206,10 +380,10 @@
 
 		// Pipeline: white box response (with sound chime) -> mic turns on for 5 sec with the sound chime
 		serverState.onAiAnalysisReceived = (analysisText: string) => {
-			if (analysisText) {
+			if (analysisText && !isSceneWireframeMode) {
 				console.log('[Camera] White box response arrived! Opening 5-second mic listening window in 500ms...');
 				setTimeout(() => {
-					if (!voiceService.isRecording && !voiceService.isPlaying) {
+					if (!voiceService.isRecording && !voiceService.isPlaying && !isSceneWireframeMode) {
 						voiceService.startHandsFreeListening(5);
 					}
 				}, 500);
@@ -217,7 +391,9 @@
 		};
 
 		mediapipeGestureService.onVoiceQueryTrigger = () => {
-			voiceService.startHandsFreeListening(5);
+			if (!isSceneWireframeMode) {
+				voiceService.startHandsFreeListening(5);
+			}
 		};
 
 		if (containerEl) {
@@ -249,6 +425,11 @@
 
 	onDestroy(() => {
 		ctx?.revert();
+		wireframeTimelineCtx?.revert();
+		sceneWireframeService.cleanup();
+		if (frozenShotUrl) {
+			try { URL.revokeObjectURL(frozenShotUrl); } catch (_) {}
+		}
 		voiceService.stopPlayback();
 		voiceService.cancelHandsFreeListening();
 		mediapipePoseService.stop();
@@ -313,78 +494,143 @@
 			muted
 			class="w-full h-full object-cover {facingMode === 'user' ? '-scale-x-100' : ''} {cameraLoading || cameraError ? 'opacity-0' : 'opacity-100'} transition-opacity duration-200"
 		></video>
+
+		<!-- Empty Scene Wireframe Scope: Frozen Shot & Wireframe Image (Exact Same Aspect Ratio) -->
+		{#if wireframeState !== 'idle' && frozenShotUrl}
+			<div
+				bind:this={wireframeScopeEl}
+				class="absolute inset-0 z-10 overflow-hidden flex items-center justify-center pointer-events-none"
+			>
+				<!-- Frozen Captured Background Image -->
+				{#if frozenShotUrl}
+					<img
+						bind:this={frozenImgEl}
+						src={frozenShotUrl}
+						alt="Captured empty background"
+						class="absolute inset-0 w-full h-full object-cover will-change-transform"
+					/>
+				{/if}
+
+				<!-- Holographic Scanning Beam Effect -->
+				<div
+					bind:this={scanBeamEl}
+					class="absolute inset-x-0 h-28 bg-gradient-to-b from-transparent via-white/20 to-transparent pointer-events-none z-20 will-change-transform opacity-0"
+				>
+					<div class="h-px w-full bg-white/60 shadow-[0_0_8px_rgba(255,255,255,0.8)]"></div>
+				</div>
+
+				<!-- AI Wireframe Skeleton Recommendation Image -->
+				{#if wireframeResultUrl}
+					<img
+						bind:this={wireframeImgEl}
+						src={wireframeResultUrl}
+						alt="AI pose wireframe suggestion"
+						class="absolute inset-0 w-full h-full object-cover z-15 opacity-0 will-change-transform"
+					/>
+				{/if}
+			</div>
+		{/if}
+
+		<!-- Empty Scene Viewfinder HUD Framing Guides -->
+		{#if isSceneWireframeMode && wireframeState === 'idle'}
+			<div class="absolute inset-0 z-10 pointer-events-none p-6 flex flex-col justify-between transition-opacity duration-300">
+				<!-- Corner ticks -->
+				<div class="flex justify-between w-full">
+					<div class="size-5 border-t border-l border-white/40 rounded-tl-xs"></div>
+					<div class="size-5 border-t border-r border-white/40 rounded-tr-xs"></div>
+				</div>
+				<div class="flex justify-between w-full mb-24">
+					<div class="size-5 border-b border-l border-white/40 rounded-bl-xs"></div>
+					<div class="size-5 border-b border-r border-white/40 rounded-br-xs"></div>
+				</div>
+			</div>
+		{/if}
 	</div>
 
-	<!-- Top Panel: Back Button & Server Suggestion Text -->
+	<!-- Top Panel: Back Button, Toolbar & Empty Scene Wireframe Toggle -->
 	<header class="top-panel relative z-20 safe-top px-4 pt-3 space-y-2">
 		<div class="flex items-center justify-between">
 			<!-- Back Navigation Button -->
-			<Button
-				variant="outline"
-				size="icon"
+			<a
 				href="/"
-				class="size-8 rounded-md bg-background/80 backdrop-blur-sm border-border/80 shadow-xs text-foreground hover:bg-muted"
+				class="size-8 rounded-md bg-black border border-zinc-800 shadow-xs text-white hover:bg-zinc-900 active:bg-zinc-900 flex items-center justify-center transition-colors"
 				aria-label="Back"
 			>
 				<ArrowLeft class="size-4" />
-			</Button>
+			</a>
 
-			<!-- Hands-Free Gesture Shutter & Timer Controls (Shadcn Segmented Toolbar) -->
-			<div class="inline-flex items-center gap-1 rounded-lg border border-border/80 bg-background/80 p-0.5 backdrop-blur-sm shadow-xs">
-				<!-- Hands-Free Toggle Button -->
-				<Button
-					variant={mediapipeGestureService.isEnabled ? "secondary" : "ghost"}
-					size="sm"
-					onclick={() => mediapipeGestureService.toggleEnabled()}
-					class="h-7 px-2.5 rounded-md text-xs font-medium gap-1.5 transition-colors {mediapipeGestureService.isEnabled ? 'text-foreground' : 'text-muted-foreground'}"
-					aria-label="Toggle Gesture Shutter"
-				>
-					<Hand class="size-3.5 shrink-0" />
-					<span class="tracking-tight font-sans">Hands-Free</span>
-					<span
-						class="size-1.5 rounded-full {mediapipeGestureService.isEnabled ? 'bg-emerald-500 ring-2 ring-emerald-500/20' : 'bg-muted-foreground/30'}"
-					></span>
-				</Button>
+			<!-- Right Action Controls -->
+			<div class="flex items-center gap-1.5">
+				<!-- Hands-Free Gesture Shutter & Timer Controls (Shadcn Segmented Toolbar) -->
+				{#if !isSceneWireframeMode}
+					<div class="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-black p-0.5 shadow-xs transition-opacity duration-200">
+						<!-- Hands-Free Toggle Button -->
+						<button
+							type="button"
+							onclick={() => mediapipeGestureService.toggleEnabled()}
+							class="h-7 px-2.5 rounded-md text-xs font-medium gap-1.5 flex items-center transition-colors {mediapipeGestureService.isEnabled ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white hover:bg-zinc-900'}"
+							aria-label="Toggle Gesture Shutter"
+						>
+							<Hand class="size-3.5 shrink-0" />
+							<span class="tracking-tight font-sans">Hands-Free</span>
+							<span
+								class="size-1.5 rounded-full {mediapipeGestureService.isEnabled ? 'bg-emerald-500 ring-2 ring-emerald-500/20' : 'bg-zinc-600'}"
+							></span>
+						</button>
 
-				<div class="h-3.5 w-px bg-border/80"></div>
+						<div class="h-3.5 w-px bg-zinc-800"></div>
 
-				<!-- Countdown Timer Toggle Button -->
-				<Button
-					variant={mediapipeGestureService.timerDuration > 0 ? "secondary" : "ghost"}
-					size="sm"
-					onclick={() => mediapipeGestureService.toggleTimer()}
-					class="h-7 px-2 rounded-md font-mono text-xs gap-1 transition-colors {mediapipeGestureService.timerDuration > 0 ? 'text-foreground' : 'text-muted-foreground'}"
-					aria-label="Toggle Countdown Timer"
-				>
-					<Timer class="size-3.5 shrink-0" />
-					<span class="tabular-nums font-semibold">
-						{mediapipeGestureService.timerDuration > 0 ? `${mediapipeGestureService.timerDuration}s` : 'Off'}
-					</span>
-				</Button>
-			</div>
-		</div>
-
-		<!-- Server Suggestion Box -->
-		<div class="w-full rounded-lg bg-card/90 backdrop-blur-md border border-border p-3 shadow-xs">
-			<div class="flex items-center justify-between mb-1">
-				<span class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5 font-sans">
-					{#if n8nService.isAnalyzing}
-						<RefreshCw class="size-3 animate-spin text-primary" />
-						<span class="text-primary font-medium">Analyzing...</span>
-					{:else}
-						<span>AI Suggestion</span>
-					{/if}
-				</span>
-				{#if serverState.isConnected}
-					<span class="text-[11px] font-mono tabular-nums text-muted-foreground">
-						{serverState.latency}ms
-					</span>
+						<!-- Countdown Timer Toggle Button -->
+						<button
+							type="button"
+							onclick={() => mediapipeGestureService.toggleTimer()}
+							class="h-7 px-2 rounded-md font-mono text-xs gap-1 flex items-center transition-colors {mediapipeGestureService.timerDuration > 0 ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white hover:bg-zinc-900'}"
+							aria-label="Toggle Countdown Timer"
+						>
+							<Timer class="size-3.5 shrink-0" />
+							<span class="tabular-nums font-semibold">
+								{mediapipeGestureService.timerDuration > 0 ? `${mediapipeGestureService.timerDuration}s` : 'Off'}
+							</span>
+						</button>
+					</div>
 				{/if}
+
+				<!-- Scene Pose Mode Toggle Button (Clean Icon Button) -->
+				<button
+					type="button"
+					onclick={toggleSceneWireframeMode}
+					class="size-8 rounded-md flex items-center justify-center transition-colors {isSceneWireframeMode ? 'bg-zinc-800 text-white border border-zinc-700' : 'bg-black text-zinc-300 border border-zinc-800 hover:bg-zinc-900 hover:text-white'} shadow-xs"
+					aria-label="Toggle Scene Pose Mode"
+					title="Scene Pose Mode"
+				>
+					<ScanLine class="size-4" />
+				</button>
 			</div>
-			<p bind:this={suggestionTextEl} class="text-sm font-normal leading-relaxed text-card-foreground max-h-36 overflow-y-auto pr-1">
-				{serverState.currentSuggestion.text}
-			</p>
 		</div>
+
+		<!-- Server Suggestion Box (Disabled in Scene Pose Mode) -->
+		{#if !isSceneWireframeMode}
+			<div class="w-full rounded-lg bg-zinc-950 border border-zinc-800 p-3 shadow-xs">
+				<div class="flex items-center justify-between mb-1">
+					<span class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5 font-sans">
+						{#if n8nService.isAnalyzing}
+							<RefreshCw class="size-3 animate-spin text-primary" />
+							<span class="text-primary font-medium">Analyzing...</span>
+						{:else}
+							<span>AI Suggestion</span>
+						{/if}
+					</span>
+					{#if serverState.isConnected}
+						<span class="text-[11px] font-mono tabular-nums text-muted-foreground">
+							{serverState.latency}ms
+						</span>
+					{/if}
+				</div>
+				<p bind:this={suggestionTextEl} class="text-sm font-normal leading-relaxed text-card-foreground max-h-36 overflow-y-auto pr-1">
+					{serverState.currentSuggestion.text}
+				</p>
+			</div>
+		{/if}
 	</header>
 
 	<!-- Gesture Status Callout Card (Shadcn Notification) -->
@@ -460,66 +706,68 @@
 
 	<!-- Bottom Panel: Shutter, Mic & Camera Switch -->
 	<footer class="relative z-20 safe-bottom px-6 pb-6 flex flex-col items-center gap-3">
-		<!-- Floating Voice Status (Shadcn Typography & Geometry) -->
-		{#if voiceService.isAutoListening}
-			<div
-				class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-lg text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
-			>
-				<span class="relative flex size-2 shrink-0">
-					<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>
-					<span class="relative inline-flex rounded-full size-2 bg-emerald-500"></span>
-				</span>
-				<div class="flex items-center gap-2 text-xs">
-					<span class="font-mono text-[10px] uppercase font-semibold text-emerald-500 tracking-wider">Listening</span>
-					<span class="text-border">·</span>
-					<span class="font-medium text-foreground">"Hey photo nallathano?"</span>
-					<span class="text-border">·</span>
-					<span class="font-mono text-[11px] tabular-nums text-muted-foreground">{voiceService.autoListenRemaining}s</span>
+		<!-- Floating Voice Status (Hidden in Scene Pose Mode) -->
+		{#if !isSceneWireframeMode}
+			{#if voiceService.isAutoListening}
+				<div
+					class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-lg text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
+				>
+					<span class="relative flex size-2 shrink-0">
+						<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>
+						<span class="relative inline-flex rounded-full size-2 bg-emerald-500"></span>
+					</span>
+					<div class="flex items-center gap-2 text-xs">
+						<span class="font-mono text-[10px] uppercase font-semibold text-emerald-500 tracking-wider">Listening</span>
+						<span class="text-border">·</span>
+						<span class="font-medium text-foreground">"Hey photo nallathano?"</span>
+						<span class="text-border">·</span>
+						<span class="font-mono text-[11px] tabular-nums text-muted-foreground">{voiceService.autoListenRemaining}s</span>
+					</div>
 				</div>
-			</div>
-		{:else if voiceService.isPlaying}
-			<div
-				class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-md text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
-			>
-				<Volume2 class="size-3.5 text-primary animate-pulse shrink-0" />
-				<div class="flex items-center gap-1.5 text-xs">
-					<span class="font-mono text-[10px] uppercase font-semibold text-primary tracking-wider">Responding</span>
-					<span class="text-border">·</span>
-					<span class="font-medium text-foreground">Malayalam voice advice</span>
+			{:else if voiceService.isPlaying}
+				<div
+					class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-md text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
+				>
+					<Volume2 class="size-3.5 text-primary animate-pulse shrink-0" />
+					<div class="flex items-center gap-1.5 text-xs">
+						<span class="font-mono text-[10px] uppercase font-semibold text-primary tracking-wider">Responding</span>
+						<span class="text-border">·</span>
+						<span class="font-medium text-foreground">Malayalam voice advice</span>
+					</div>
 				</div>
-			</div>
-		{:else if voiceService.isProcessing}
-			<div
-				class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-md text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
-			>
-				<Loader2 class="size-3.5 text-primary animate-spin shrink-0" />
-				<span class="text-xs font-medium text-foreground">{voiceService.statusMessage}</span>
-			</div>
-		{:else if voiceService.isRecording}
-			<div
-				class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-destructive/40 shadow-md text-destructive transition-all animate-in fade-in slide-in-from-bottom-2"
-			>
-				<span class="relative flex size-2 shrink-0">
-					<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-destructive opacity-75"></span>
-					<span class="relative inline-flex rounded-full size-2 bg-destructive"></span>
-				</span>
-				<span class="text-xs font-semibold uppercase tracking-wider font-mono">
-					Recording {voiceService.formattedDuration}
-				</span>
-				<span class="text-[11px] text-muted-foreground font-normal">(Release to send)</span>
-			</div>
-		{:else if voiceService.state === 'error'}
-			<div
-				class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-destructive/40 shadow-md transition-all animate-in fade-in slide-in-from-bottom-2"
-			>
-				<span class="text-xs font-medium text-destructive">
-					{voiceService.statusMessage}
-				</span>
-			</div>
+			{:else if voiceService.isProcessing}
+				<div
+					class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-border/80 shadow-md text-foreground transition-all animate-in fade-in slide-in-from-bottom-2"
+				>
+					<Loader2 class="size-3.5 text-primary animate-spin shrink-0" />
+					<span class="text-xs font-medium text-foreground">{voiceService.statusMessage}</span>
+				</div>
+			{:else if voiceService.isRecording}
+				<div
+					class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-destructive/40 shadow-md text-destructive transition-all animate-in fade-in slide-in-from-bottom-2"
+				>
+					<span class="relative flex size-2 shrink-0">
+						<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-destructive opacity-75"></span>
+						<span class="relative inline-flex rounded-full size-2 bg-destructive"></span>
+					</span>
+					<span class="text-xs font-semibold uppercase tracking-wider font-mono">
+						Recording {voiceService.formattedDuration}
+					</span>
+					<span class="text-[11px] text-muted-foreground font-normal">(Release to send)</span>
+				</div>
+			{:else if voiceService.state === 'error'}
+				<div
+					class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/95 backdrop-blur-md border border-destructive/40 shadow-md transition-all animate-in fade-in slide-in-from-bottom-2"
+				>
+					<span class="text-xs font-medium text-destructive">
+						{voiceService.statusMessage}
+					</span>
+				</div>
+			{/if}
 		{/if}
 
-		<!-- Persistent Whiter AI Analysis Bubble (n8n / ShutterMuse Server Output) -->
-		{#if serverState.aiAnalysis && serverState.aiAnalysis.visible}
+		<!-- Persistent Whiter AI Analysis Bubble (Hidden in Scene Pose Mode) -->
+		{#if !isSceneWireframeMode && serverState.aiAnalysis && serverState.aiAnalysis.visible}
 			<div
 				class="w-full rounded-2xl bg-white text-zinc-950 border border-zinc-200 shadow-2xl p-4 transition-all duration-300 animate-in fade-in slide-in-from-bottom-3 backdrop-blur-md dark:bg-zinc-100 dark:text-zinc-900 dark:border-zinc-300 select-text"
 			>
@@ -550,67 +798,126 @@
 			</div>
 		{/if}
 
-		<div class="w-full flex items-center justify-between">
-			<!-- Mic Button (Press and hold with Shadcn Design Language) -->
-			<div class="relative size-12 shrink-0 flex items-center justify-center">
-				{#if voiceService.isRecording}
-					<span class="absolute inset-0 rounded-lg bg-destructive/30 animate-ping"></span>
+		<!-- Post-Generation Wireframe Action Card (Revealed state - Strict Shadcn Typography & Layout) -->
+		{#if wireframeState === 'revealed'}
+			<div
+				bind:this={wireframeCardEl}
+				class="w-full max-w-sm rounded-xl border border-zinc-800 bg-zinc-950 p-4 shadow-lg text-zinc-100 space-y-3 pointer-events-auto"
+			>
+				<div class="flex items-center justify-between pb-2 border-b border-zinc-800">
+					<div class="flex items-center gap-2">
+						<ScanLine class="size-4 text-zinc-100" />
+						<span class="text-xs font-semibold tracking-tight text-zinc-100 font-sans">
+							Pose Recommendation
+						</span>
+					</div>
+					<span class="inline-flex items-center rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[10px] font-medium text-zinc-400">
+						Wireframe Ready
+					</span>
+				</div>
+
+				<p class="text-xs text-zinc-400 leading-relaxed font-sans">
+					Aesthetic pose skeleton plotted for this scene. Position yourself or your subject matching the guide.
+				</p>
+
+				<div class="grid grid-cols-2 gap-2 pt-1">
+					<button
+						type="button"
+						onclick={() => resetWireframeMode(true)}
+						class="h-8 rounded-md text-xs font-medium gap-1.5 bg-zinc-900 border border-zinc-700 text-white hover:bg-zinc-800 flex items-center justify-center shadow-xs"
+					>
+						<RotateCcw class="size-3.5" />
+						<span>Retake</span>
+					</button>
+
+					<button
+						type="button"
+						onclick={() => resetWireframeMode(false)}
+						class="h-8 rounded-md text-xs font-medium gap-1.5 shadow-xs bg-white text-black hover:bg-zinc-200 flex items-center justify-center"
+					>
+						<Check class="size-3.5" />
+						<span>Back to Camera</span>
+					</button>
+				</div>
+			</div>
+		{:else if wireframeState === 'processing'}
+			<div
+				class="w-full max-w-xs rounded-lg border border-zinc-800 bg-zinc-950 p-3.5 shadow-md text-zinc-100 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2"
+			>
+				<Loader2 class="size-4 animate-spin text-zinc-400 shrink-0" />
+				<div class="space-y-0.5">
+					<p class="text-xs font-semibold leading-none tracking-tight text-zinc-100 font-sans">Analyzing Scene</p>
+					<p class="text-[11px] text-zinc-400 leading-normal">Generating recommended pose wireframe...</p>
+				</div>
+			</div>
+		{:else}
+			<div class="w-full flex items-center justify-between">
+				<!-- Mic Button (Disabled & Hidden in Scene Pose mode) -->
+				{#if !isSceneWireframeMode}
+					<div class="relative size-12 shrink-0 flex items-center justify-center">
+						{#if voiceService.isRecording}
+							<span class="absolute inset-0 rounded-lg bg-destructive/30 animate-ping"></span>
+						{/if}
+						<button
+							type="button"
+							aria-label="Hold to record voice note"
+							onpointerdown={(e) => {
+								try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
+								voiceService.startRecording();
+							}}
+							onpointerup={(e) => {
+								try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+								voiceService.stopRecordingAndSend();
+							}}
+							onpointercancel={(e) => {
+								try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+								voiceService.stopRecordingAndSend();
+							}}
+							class="mic-btn size-11 shrink-0 rounded-lg border border-zinc-800 flex items-center justify-center select-none touch-none focus:outline-none transition-all active:scale-95 {voiceService.isRecording ? 'bg-destructive border-destructive text-white scale-105 shadow-md shadow-destructive/40' : voiceService.isProcessing ? 'bg-amber-950 border-amber-600 text-amber-400' : voiceService.isPlaying ? 'bg-emerald-950 border-emerald-600 text-emerald-400' : 'bg-black text-white shadow-xs hover:bg-zinc-900'}"
+						>
+							{#if voiceService.isRecording}
+								<Mic class="size-5 animate-pulse text-white" />
+							{:else if voiceService.isProcessing}
+								<Loader2 class="size-5 animate-spin" />
+							{:else if voiceService.isPlaying}
+								<Volume2 class="size-5 animate-bounce" />
+							{:else}
+								<Mic class="size-5 text-white" />
+							{/if}
+						</button>
+					</div>
+				{:else}
+					<div class="size-11 shrink-0"></div>
 				{/if}
+
+				<!-- Shutter Button (Clean Shadcn Styling) -->
+				<button
+					bind:this={shutterBtnEl}
+					onclick={handleShutter}
+					disabled={isCapturing || n8nService.isAnalyzing || sceneWireframeService.isGenerating}
+					class="shutter-btn size-18 rounded-full border-4 border-white p-1 flex items-center justify-center active:scale-95 transition-all focus:outline-none {isCapturing || n8nService.isAnalyzing || sceneWireframeService.isGenerating ? 'opacity-50 pointer-events-none' : ''}"
+					aria-label="Shutter"
+				>
+					<span class="size-full rounded-full bg-white active:bg-zinc-200 flex items-center justify-center transition-colors">
+						{#if isCapturing || n8nService.isAnalyzing || sceneWireframeService.isGenerating}
+							<Loader2 class="size-6 animate-spin text-zinc-900" />
+						{:else if isSceneWireframeMode}
+							<ScanLine class="size-5 text-zinc-900" />
+						{/if}
+					</span>
+				</button>
+
+				<!-- Flip Camera Button -->
 				<button
 					type="button"
-					aria-label="Hold to record voice note"
-					onpointerdown={(e) => {
-						try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
-						voiceService.startRecording();
-					}}
-					onpointerup={(e) => {
-						try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
-						voiceService.stopRecordingAndSend();
-					}}
-					onpointercancel={(e) => {
-						try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
-						voiceService.stopRecordingAndSend();
-					}}
-					class="mic-btn size-11 shrink-0 rounded-lg border border-border/80 flex items-center justify-center select-none touch-none focus:outline-none transition-all active:scale-95 {voiceService.isRecording ? 'bg-destructive border-destructive text-white scale-105 shadow-md shadow-destructive/40' : voiceService.isProcessing ? 'bg-amber-500/20 border-amber-500/40 text-amber-400' : voiceService.isPlaying ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400' : 'bg-background/80 backdrop-blur-sm border-border text-foreground shadow-xs hover:bg-muted'}"
+					bind:this={flipBtnEl}
+					onclick={toggleCameraFacing}
+					class="flip-btn size-11 rounded-lg bg-black border border-zinc-800 shadow-xs text-white hover:bg-zinc-900 active:scale-95 flex items-center justify-center transition-all"
+					aria-label="Flip Camera"
 				>
-					{#if voiceService.isRecording}
-						<Mic class="size-5 animate-pulse text-white" />
-					{:else if voiceService.isProcessing}
-						<Loader2 class="size-5 animate-spin" />
-					{:else if voiceService.isPlaying}
-						<Volume2 class="size-5 animate-bounce" />
-					{:else}
-						<Mic class="size-5 text-foreground" />
-					{/if}
+					<FlipHorizontal class="size-5" />
 				</button>
 			</div>
-
-			<!-- Shutter Button -->
-			<button
-				bind:this={shutterBtnEl}
-				onclick={handleShutter}
-				disabled={isCapturing || n8nService.isAnalyzing}
-				class="shutter-btn size-18 rounded-full border-4 border-white p-1 flex items-center justify-center active:scale-95 transition-all focus:outline-none {isCapturing || n8nService.isAnalyzing ? 'opacity-50 pointer-events-none' : ''}"
-				aria-label="Shutter"
-			>
-				<span class="size-full rounded-full bg-white active:bg-zinc-200 flex items-center justify-center">
-					{#if isCapturing || n8nService.isAnalyzing}
-						<Loader2 class="size-6 animate-spin text-zinc-900" />
-					{/if}
-				</span>
-			</button>
-
-			<!-- Flip Camera Button -->
-			<Button
-				variant="outline"
-				size="icon"
-				bind:ref={flipBtnEl}
-				onclick={toggleCameraFacing}
-				class="flip-btn size-11 rounded-lg bg-background/80 backdrop-blur-sm border-border/80 shadow-xs text-foreground active:scale-95 transition-transform"
-				aria-label="Flip Camera"
-			>
-				<FlipHorizontal class="size-5" />
-			</Button>
-		</div>
+		{/if}
 	</footer>
 </div>

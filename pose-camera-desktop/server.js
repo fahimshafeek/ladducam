@@ -13,6 +13,9 @@ const N8N_IMAGE_TEST_URL = process.env.N8N_IMAGE_TEST_URL || 'http://localhost:5
 const N8N_IMAGE_PROD_URL = process.env.N8N_IMAGE_PROD_URL || 'http://localhost:5678/webhook/getimg';
 const N8N_VOICE_TEST_URL = process.env.N8N_VOICE_TEST_URL || 'http://localhost:5678/webhook-test/getvoice';
 const N8N_VOICE_PROD_URL = process.env.N8N_VOICE_PROD_URL || 'http://localhost:5678/webhook/getvoice';
+const N8N_SCENE_POSE_URL = process.env.N8N_SCENE_POSE_URL || 'http://localhost:5678/webhook/scene-pose';
+const SHUTTERMUSE_POSE_URL = process.env.SHUTTERMUSE_POSE_URL || 'http://localhost:8000/api/pose-upload?return_format=image';
+
 
 /**
  * Discovers the host's primary non-internal IPv4 LAN address
@@ -230,6 +233,90 @@ const server = http.createServer(async (req, res) => {
 		return;
 	}
 
+	// HTTP Proxy Endpoint for Mobile Empty Scene Wireframe Pose Recommendation
+	if (
+		req.method === 'POST' &&
+		(req.url.startsWith('/api/scene-wireframe') || req.url.startsWith('/api/scene-pose') || req.url.startsWith('/scene-wireframe'))
+	) {
+		try {
+			const chunks = [];
+			for await (const chunk of req) {
+				chunks.push(chunk);
+			}
+			let bodyBuffer = Buffer.concat(chunks);
+			const contentType = req.headers['content-type'] || 'image/jpeg';
+
+			// If client sent multipart/form-data, extract clean binary buffer
+			if (contentType.includes('multipart/form-data')) {
+				const headerEnd = bodyBuffer.indexOf('\r\n\r\n');
+				if (headerEnd !== -1) {
+					const start = headerEnd + 4;
+					const end = bodyBuffer.lastIndexOf('\r\n--');
+					if (end > start) {
+						bodyBuffer = bodyBuffer.subarray(start, end);
+					}
+				}
+			}
+
+			sendDesktopLog('info', `📐 Received empty scene frame (${Math.round(bodyBuffer.length / 1024)} KB)`);
+
+			// 1. Try forwarding to user's n8n scene webhook first (if configured)
+			let forwardResult = null;
+			try {
+				forwardResult = await forwardToN8n(
+					bodyBuffer,
+					'file',
+					'scene.jpg',
+					'image/jpeg',
+					N8N_SCENE_POSE_URL,
+					[SHUTTERMUSE_POSE_URL]
+				);
+			} catch (n8nErr) {
+				sendDesktopLog('warn', `n8n scene pose failed (${n8nErr.message}), falling back directly to ShutterMuse on port 8000...`);
+			}
+
+			// If forwardResult produced an image buffer directly:
+			if (forwardResult && forwardResult.isImage && forwardResult.imgBuffer) {
+				res.writeHead(200, {
+					'Content-Type': forwardResult.contentType || 'image/jpeg',
+					'Access-Control-Allow-Origin': '*'
+				});
+				res.end(forwardResult.imgBuffer);
+				return;
+			}
+
+			// 2. Fallback direct request to ShutterMuse server on port 8000
+			const blob = new Blob([bodyBuffer], { type: 'image/jpeg' });
+			const formData = new FormData();
+			formData.append('file', blob, 'scene.jpg');
+
+			const smRes = await fetch(SHUTTERMUSE_POSE_URL, {
+				method: 'POST',
+				body: formData
+			});
+
+			if (smRes.ok) {
+				const smArrayBuffer = await smRes.arrayBuffer();
+				const smBuffer = Buffer.from(smArrayBuffer);
+				sendDesktopLog('success', `Generated wireframe pose image (${Math.round(smBuffer.length / 1024)} KB)`);
+				res.writeHead(200, {
+					'Content-Type': 'image/jpeg',
+					'Access-Control-Allow-Origin': '*'
+				});
+				res.end(smBuffer);
+			} else {
+				const errText = await smRes.text().catch(() => '');
+				throw new Error(`ShutterMuse returned HTTP ${smRes.status}: ${errText}`);
+			}
+		} catch (err) {
+			console.error('[SCENE WIREFRAME ERROR]', err);
+			sendDesktopLog('warn', `Scene wireframe error: ${err.message}`);
+			res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+			res.end(JSON.stringify({ error: err.message }));
+		}
+		return;
+	}
+
 	res.writeHead(404, { 'Content-Type': 'text/plain' });
 	res.end('Not found');
 });
@@ -328,16 +415,29 @@ async function forwardToN8n(buffer, fieldName, filename, mimeType, primaryUrl, f
 				};
 			}
 
-			// 2. If response is JSON or text
+			// 2. If response is binary image (.jpg / .png / image/*)
+			if (contentType.includes('image')) {
+				const imageArrayBuffer = await response.arrayBuffer();
+				const imgBuffer = Buffer.from(imageArrayBuffer);
+				sendDesktopLog('success', `Received image response (${Math.round(imgBuffer.length / 1024)} KB) in ${elapsed}ms`);
+				return {
+					isImage: true,
+					imgBuffer,
+					contentType,
+					elapsedMs: elapsed
+				};
+			}
+
+			// 3. If response is JSON or text
 			const textBody = await response.text();
 			let parsed = null;
 			try {
 				parsed = JSON.parse(textBody);
 			} catch (_) {}
 
-			// Check if JSON response wraps audio data (base64 mp3)
+			// Check if JSON response wraps audio data (base64 mp3) or image data (base64)
 			if (parsed && typeof parsed === 'object') {
-				const possibleAudio = parsed.audio || parsed.mp3 || parsed.audio_base64 || (typeof parsed.data === 'string' && parsed.data.length > 500 ? parsed.data : null);
+				const possibleAudio = parsed.audio || parsed.mp3 || parsed.audio_base64 || (typeof parsed.data === 'string' && parsed.data.length > 500 && !parsed.data.startsWith('data:image/') ? parsed.data : null);
 				if (possibleAudio) {
 					const cleanB64 = possibleAudio.replace(/^data:audio\/\w+;base64,/, '');
 					const mp3Buffer = Buffer.from(cleanB64, 'base64');
@@ -349,7 +449,22 @@ async function forwardToN8n(buffer, fieldName, filename, mimeType, primaryUrl, f
 						elapsedMs: elapsed
 					};
 				}
+
+				const possibleImage = parsed.rendered_image_base64 || parsed.image || (typeof parsed.data === 'string' && (parsed.data.startsWith('data:image/') || parsed.data.length > 1000) ? parsed.data : null);
+				if (possibleImage) {
+					const cleanB64 = possibleImage.replace(/^data:image\/\w+;base64,/, '');
+					const imgBuffer = Buffer.from(cleanB64, 'base64');
+					sendDesktopLog('success', `Received JSON-wrapped wireframe image (${Math.round(imgBuffer.length / 1024)} KB) in ${elapsed}ms`);
+					return {
+						isImage: true,
+						imgBuffer,
+						reason: parsed.reason || '',
+						contentType: 'image/jpeg',
+						elapsedMs: elapsed
+					};
+				}
 			}
+
 
 			let cleanText = '';
 			let tips = [];

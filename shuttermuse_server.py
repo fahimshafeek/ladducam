@@ -113,25 +113,33 @@ class ModelService:
     def ensure_model(self):
         """Ensures the 4-bit model is loaded in VRAM, unloading Ollama first if needed."""
         with self.lock:
-            if self.model is not None:
-                return
-
             # 1. Ask Ollama to release VRAM so ShutterMuse gets full 6GB
             try:
                 import urllib.request, json
-                req = urllib.request.Request(
-                    "http://localhost:11434/api/generate",
-                    data=json.dumps({"model": "gemma4:e2b", "keep_alive": 0}).encode("utf-8"),
-                    headers={"Content-Type": "application/json"}
-                )
-                urllib.request.urlopen(req, timeout=1.0)
-            except Exception:
-                pass
+                req_ps = urllib.request.Request("http://localhost:11434/api/ps")
+                with urllib.request.urlopen(req_ps, timeout=2.0) as resp:
+                    ps_data = json.loads(resp.read().decode("utf-8"))
+                    for m in ps_data.get("models", []):
+                        m_name = m.get("model") or m.get("name")
+                        if m_name:
+                            req_unload = urllib.request.Request(
+                                "http://localhost:11434/api/generate",
+                                data=json.dumps({"model": m_name, "keep_alive": 0}).encode("utf-8"),
+                                headers={"Content-Type": "application/json"}
+                            )
+                            urllib.request.urlopen(req_unload, timeout=2.0)
+            except Exception as e:
+                print(f"[*] Note: Ollama VRAM cleanup: {e}")
 
             import gc
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+
+            if self.model is not None:
+                return
 
             import transformers
             candidate_classes = [
@@ -182,32 +190,18 @@ class ModelService:
             print(f"[✓] ShutterMuse model loaded on GPU in {time.time() - t0:.2f}s!")
 
     def release_model(self):
-        """Frees ShutterMuse VRAM and pre-warms Gemma 4 in Ollama on 100% GPU."""
+        """Frees ShutterMuse VRAM completely right before exiting."""
         with self.lock:
             if self.model is not None:
                 del self.model
                 self.model = None
-                import gc
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                print("[✓] ShutterMuse VRAM released.")
-
-        def warmup_gemma():
-            try:
-                time.sleep(0.2)
-                import urllib.request, json
-                req = urllib.request.Request(
-                    "http://localhost:11434/api/generate",
-                    data=json.dumps({"model": "gemma4:e2b", "prompt": "ഹലോ", "keep_alive": "15m", "stream": False}).encode("utf-8"),
-                    headers={"Content-Type": "application/json"}
-                )
-                urllib.request.urlopen(req, timeout=15)
-                print("[✓] Ollama Gemma 4 pre-warmed on 100% GPU!")
-            except Exception as e:
-                print(f"[*] Gemma 4 warmup note: {e}")
-
-        threading.Thread(target=warmup_gemma, daemon=True).start()
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+            print("[✓] ShutterMuse VRAM completely cleared.")
 
 
 

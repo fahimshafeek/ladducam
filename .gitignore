@@ -43,5 +43,10 @@ models/
 *.wasm
 **/static/mediapipe/
 
+# Docker services (stt, tts, etc)
+dockers/
 
-
+# Scratch & test images
+reference.jpeg
+output.jpg
+tom.jpg

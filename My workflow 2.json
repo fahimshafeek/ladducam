@@ -1,0 +1,449 @@
+{
+  "name": "My workflow 2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "getvoice",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -16,
+        528
+      ],
+      "id": "decd799c-36dc-44fb-9b96-6c21d98cc3f9",
+      "name": "GetVoice",
+      "webhookId": "ee68bc1e-33a5-4b7d-b77d-e9ef5f5c948b"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8081/inference",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "multipart/form-data"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "file"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        288,
+        528
+      ],
+      "id": "94156e31-b5f8-4e70-b585-27df5ab272ca",
+      "name": "STT"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8001/v1/audio/speech",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "{\n  \"Content-Type\": \"application/json\"\n}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"model\": \"tts-1\", \"input\": $json.content, \"voice\": \"meera\" } }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        896,
+        528
+      ],
+      "id": "923b0c39-5fe5-458c-a38e-6cb8c9a835d5",
+      "name": "TTS"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  let rawResponse = item.json.raw_text\n    || item.json.response\n    || item.json.text\n    || item.json.output\n    || item.json.message?.content\n    || '';\n\n  const latency = item.json.latency_seconds || null;\n\n  if (!rawResponse || typeof rawResponse !== 'string') {\n    return {\n      json: {\n        success: false,\n        clean_text: 'No advice returned.',\n        response: 'No advice returned.',\n        text: 'No advice returned.',\n        tips: [],\n        latency_seconds: latency\n      }\n    };\n  }\n\n  // --- Step 0: Handle stringified or truncated JSON / Model Hallucinations ---\n  let t = rawResponse.trim();\n\n  // If the model dumped raw JSON or a truncated JSON string\n  if (t.startsWith('{') || t.startsWith('[')) {\n    let parsedText = null;\n\n    // Try normal JSON.parse first\n    try {\n      const parsed = JSON.parse(t);\n      parsedText = parsed.reason \n        || parsed.instruction \n        || parsed.clean_text \n        || (Array.isArray(parsed) && parsed[0]?.reason)\n        || (parsed.instance_info && parsed.instance_info[0]?.reason);\n    } catch (_) {\n      // If JSON is broken/truncated, extract \"reason\" or \"instruction\" via regex\n      const matchReason = t.match(/\"reason\"\\s*:\\s*\"([^\"\\\\]*(?:\\\\.[^\"\\\\]*)*)\"/i)\n        || t.match(/\"instruction\"\\s*:\\s*\"([^\"\\\\]*(?:\\\\.[^\"\\\\]*)*)\"/i);\n      \n      if (matchReason && matchReason[1]) {\n        parsedText = matchReason[1].replace(/\\\\\"/g, '\"').replace(/\\\\n/g, '\\n');\n      }\n    }\n\n    if (parsedText) {\n      t = parsedText;\n    }\n  }\n\n  // 1. Remove code blocks and HTML tags\n  t = t\n    .replace(/```(?:json)?[\\s\\S]*?```/gi, '')\n    .replace(/<[^>]+>/g, '');\n\n  // 2. Remove markdown formatting and standardize punctuation\n  t = t\n    .replace(/\\*\\*([^*]+)\\*\\*/g, '$1')\n    .replace(/\\*([^*]+)\\*/g, '$1')\n    .replace(/__([^_]+)__/g, '$1')\n    .replace(/_([^_]+)_/g, '$1')\n    .replace(/`([^`]+)`/g, '$1')\n    .replace(/^#+\\s*/gm, '')\n    .replace(/^>\\s*/gm, '')\n    .replace(/[\\u2014\\u2013]/g, ' - ')\n    .replace(/[\\u201C\\u201D]/g, '\"')\n    .replace(/[\\u2018\\u2019]/g, \"'\")\n    .replace(/\\\\\"/g, '\"')\n    .replace(/\\r\\n/g, '\\n');\n\n  // 3. Remove conversational intros / filler\n  const introPatterns = [\n    /^(?:sure|certainly|absolutely|of course|hello|hi|hey|ok|okay)[!.,\\s]*/i,\n    /^(?:here (?:is|are)|i have|below (?:is|are))\\s+(?:\\d+\\s+)?(?:quick\\s+)?(?:tips|recommendations|advice|suggestions|steps|rules)[^:\\n]*[:\\n\\s]*/i,\n    /^(?:based on (?:the|this) (?:image|photo|picture|scene)|looking at (?:the|this) (?:image|photo))[^:\\n]*[:\\n\\s]*/i\n  ];\n  for (const pat of introPatterns) {\n    t = t.replace(pat, '').trim();\n  }\n\n  // 4. Remove conversational outros / pleasantries\n  const outroPatterns = [\n    /(?:\\n\\s*|\\.\\s+)(?:these tips (?:can|will) help|hope this helps|hope (?:these|this)|let me know if|happy (?:shooting|clicking)|feel free to ask)[\\s\\S]*$/i,\n    /(?:\\n\\s*|\\.\\s+)bonus(?: tip)?[:\\s\\S]*$/i\n  ];\n  for (const pat of outroPatterns) {\n    t = t.replace(pat, '').trim();\n  }\n\n  // 5. Extract numbered or bulleted tips\n  const tips = [];\n  const pointRegex = /(?:^|\\n)(?:(?:\\d+|[A-Za-z])[\\.\\)]|[-•*])\\s*([\\s\\S]*?)(?=(?:\\n(?:(?:\\d+|[A-Za-z])[\\.\\)]|[-•*])|\\n\\n|$))/g;\n  let match;\n  while ((match = pointRegex.exec(t)) !== null) {\n    let pt = match[0].trim();\n    pt = pt.replace(/^(?:(?:\\d+|[A-Za-z])[\\.\\)]|[-•*])\\s*/, '').trim();\n    if (pt.length > 5 && !tips.includes(pt)) {\n      tips.push(pt);\n    }\n  }\n\n  // 6. Build clean text\n  let cleanText = '';\n  if (tips.length > 0) {\n    cleanText = tips.map((tip, idx) => `${idx + 1}. ${tip}`).join('\\n\\n');\n  } else {\n    cleanText = t.replace(/\\n{3,}/g, '\\n\\n').trim();\n  }\n\n  // Check if we ended up with valid advice or an unparsed loop\n  const isValid = cleanText.length > 0 && !cleanText.startsWith('{\"');\n\n  return {\n    json: {\n      success: isValid,\n      clean_text: isValid ? cleanText : 'Unable to parse valid advice.',\n      response: isValid ? cleanText : 'Unable to parse valid advice.',\n      text: isValid ? cleanText : 'Unable to parse valid advice.',\n      tips: tips.length > 0 ? tips : (isValid ? [cleanText] : []),\n      latency_seconds: latency\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        -48
+      ],
+      "id": "9ad3a75c-3dd6-4a7b-becc-e26e0c1edaed",
+      "name": "Parse English Response"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/text",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "image",
+              "inputDataFieldName": "data0"
+            },
+            {
+              "name": "side",
+              "value": "subject"
+            },
+            {
+              "name": "prompt",
+              "value": "Look at this image and tell me, in a friendly voice and speaking directly to the person, what to change for the next shot. Give the biggest fix first, then at most two small ones. Use \"you\" and \"your\", no third-person descriptions."
+            },
+            {
+              "name": "system_prompt",
+              "value": "You are a friendly photography buddy standing next to the person, helping them take a better photo right now. Speak directly to them in second person (\"you\", \"your\", \"try\", \"tilt\"), in a warm, casual, encouraging tone, like a friend, not a critic or a report.  Rules: - Never describe the photo in third person. Do not write \"the main subject\", \"the photo\", \"the image\", \"the frame is\", or \"it is recommended\". - Look at the image and give 1 to 3 short, specific tips. Each tip is one or two sentences, starts with an action verb, and says exactly what to move and in which direction. - Lead with the single most important fix. If a person is visible, prioritize pose and body position. Otherwise fix framing, tilt, lighting, or camera angle. - If the camera is tilted, tell the photographer to level the phone. If the subject is off-center, tell them which way to step. - Never say a photo can't be improved. If it's already good, say so cheerfully and offer one small tweak. - Only mention what is actually visible. Never invent a person, gender, or objects."
+            },
+            {
+              "name": "max_new_tokens",
+              "value": "512"
+            },
+            {
+              "name": "temperature",
+              "value": "0.2"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        320,
+        -64
+      ],
+      "id": "a77ce1eb-4171-4925-8209-dc30415de6e4",
+      "name": "Fine-tuned Model"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "getimg",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryPropertyName": "data"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -16,
+        -48
+      ],
+      "id": "a137a4c2-db32-4605-b66c-6d2736a2bb15",
+      "name": "GetImage",
+      "webhookId": "708d1722-3224-4704-abd9-a92eec250e23"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gemma4:e2b",
+          "mode": "list",
+          "cachedResultName": "gemma4:e2b"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=={{ $('GetVoice').first().json.body?.photo_context ? `ഫോട്ടോ വിവരങ്ങൾ: ${$('GetVoice').first().json.body.photo_context}\\n\\nചോദ്യം: ${$json.text}\\n\\nമുകളിൽ നൽകിയ ഫോട്ടോ വിശകലനം പരിശോധിച്ച് ചോദ്യത്തിന് സ്വാഭാവികമായ മലയാളത്തിൽ 1-2 വാക്യത്തിൽ മറുപടി നൽകുക.` : $json.text }}"
+            }
+          ]
+        },
+        "options": {
+          "system": " You are a photography coach. Always reply strictly in natural spoken Malayalam (1-3 sentences). Do not include English or translations."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.ollama",
+      "typeVersion": 1,
+      "position": [
+        496,
+        528
+      ],
+      "id": "80a8d4fa-e0c9-40bb-9562-887b756bd302",
+      "name": "Gemma 4",
+      "credentials": {
+        "ollamaApi": {
+          "id": "lml1J2vrIGauUdY8",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1056,
+        -48
+      ],
+      "id": "c9ded8a1-89cd-4b3f-ad66-84058c17cceb",
+      "name": "Return Suggestions"
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1104,
+        528
+      ],
+      "id": "46a56a41-acf8-46f5-b7d0-0ce62fecfb32",
+      "name": "Return Malayalam Reply"
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "responseDataSource": "set",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "image/jpeg"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1040,
+        256
+      ],
+      "id": "3e6b401c-1fab-4d71-aee9-4bc2237bcb8d",
+      "name": "Return Suggestions1"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "scene-pose",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryPropertyName": "file"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -32,
+        256
+      ],
+      "id": "c63c0ee2-58c0-4a99-aff8-23e41ea8b8db",
+      "name": "Background Pose Image",
+      "webhookId": "708d1722-3224-4704-abd9-a92eec250e23"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/pose-upload?return_format=image",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "file0"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        464,
+        256
+      ],
+      "id": "afbbb0ca-b073-40c4-aabc-81adbf2a3368",
+      "name": "Fine-tuned Model Wireframe"
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "modelId": {
+          "__rl": true,
+          "value": "qwen3-vl:latest",
+          "mode": "list",
+          "cachedResultName": "qwen3-vl:latest"
+        },
+        "text": "Look at this image and tell me, in a friendly voice and speaking directly to the person, what to change for the next shot. Give the biggest fix first, then at most two small ones. Use \"you\" and \"your\", no third-person descriptions.",
+        "binaryPropertyName": "data0",
+        "options": {
+          "system": "You are a friendly photography buddy standing next to the person, helping them take a better photo right now. Speak directly to them in second person (\"you\", \"your\", \"try\", \"tilt\"), in a warm, casual, encouraging tone, like a friend, not a critic or a report.  Rules: - Never describe the photo in third person. Do not write \"the main subject\", \"the photo\", \"the image\", \"the frame is\", or \"it is recommended\". - Look at the image and give 1 to 3 short, specific tips. Each tip is one or two sentences, starts with an action verb, and says exactly what to move and in which direction. - Lead with the single most important fix. If a person is visible, prioritize pose and body position. Otherwise fix framing, tilt, lighting, or camera angle. - If the camera is tilted, tell the photographer to level the phone. If the subject is off-center, tell them which way to step. - Never say a photo can't be improved. If it's already good, say so cheerfully and offer one small tweak. - Only mention what is actually visible. Never invent a person, gender, or objects."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.ollama",
+      "typeVersion": 1,
+      "position": [
+        384,
+        -368
+      ],
+      "id": "3b864769-29c8-4218-878f-0eb77293a4d5",
+      "name": "Analyze image",
+      "credentials": {
+        "ollamaApi": {
+          "id": "lml1J2vrIGauUdY8",
+          "name": "Ollama account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "GetVoice": {
+      "main": [
+        [
+          {
+            "node": "STT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "STT": {
+      "main": [
+        [
+          {
+            "node": "Gemma 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TTS": {
+      "main": [
+        [
+          {
+            "node": "Return Malayalam Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse English Response": {
+      "main": [
+        [
+          {
+            "node": "Return Suggestions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fine-tuned Model": {
+      "main": [
+        [
+          {
+            "node": "Parse English Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GetImage": {
+      "main": [
+        [
+          {
+            "node": "Fine-tuned Model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemma 4": {
+      "main": [
+        [
+          {
+            "node": "TTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Background Pose Image": {
+      "main": [
+        [
+          {
+            "node": "Fine-tuned Model Wireframe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fine-tuned Model Wireframe": {
+      "main": [
+        [
+          {
+            "node": "Return Suggestions1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze image": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "fee461be-e02a-49db-859a-f75ec730b692",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b752e6fa672edb7493048f5a09fba228a331e560fc0e510c08cb2008e782ace2"
+  },
+  "nodeGroups": [],
+  "id": "8HEWCO00DkAetn5G",
+  "tags": []
+}
